@@ -1,9 +1,15 @@
-# SPlus
-this library in the python for SPlus(Soroush+) platform robots self writed.
+# PySPlus
 
+This Python library is for SPlus platform bots and is currently being updated.
+
+## PySPlus
+
+- 1 fast
+- 2 simple syntax
+- 3 Small size of the library
 
 ## install :
 
 ```bash
-pip install https://ParsSource.ir/PySPlus/pysplus-0.3.tar.gz
+pip install --upgrade PySPlus
 ```
