@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="PySPlus",
-    version="0.2",
+    version="0.5",
     author="seyyed mohamad hosein moosavi raja(01)",
     author_email="mohamadhosein159159@gmail.com",
     description="the library SPlus platform for bots.",
