@@ -12,7 +12,9 @@ from .colors import *
 from .async_sync import *
 from typing import (
     Optional,
-    Literal
+    Literal,
+    Awaitable,
+    Callable
 )
 import time
 import os
@@ -21,9 +23,9 @@ import logging
 import pickle
 import re
 import base64
-import inspect
 from .props import props
 from .Update import Update
+import inspect
 
 logging.getLogger('selenium').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
@@ -46,6 +48,7 @@ class Client:
         self.name_cookies = name_session + "_cookies.pkl"
         self.viewing_browser = viewing_browser
         self.splus_url = "https://web.splus.ir"
+        self.me = {}
         if os.path.isfile(name):
             with open(name, "r", encoding="utf-8") as file:
                 text_json_py_slpus_session = json.load(file)
@@ -81,6 +84,10 @@ class Client:
             self.time_out = time_out
             self.user_agent = user_agent
             self.number_phone = number_phone
+            self.messages_handlers = []
+            self.running = False
+            self.list_ = []
+            self.message_handlers = []
             if display_welcome:
                 k = ""
                 for text in "Welcome to PySPlus":
@@ -404,7 +411,7 @@ class Client:
             return False
 
     @async_to_sync
-    async def send_text(self, chat_id: str, text: str,reply_message_id: Optional[str]) -> bool:
+    async def send_text(self, chat_id: str, text: str,reply_message_id: Optional[str] = None) -> bool:
         """ارسال متن / sending text"""
         try:
             await self.open_chat(chat_id)
@@ -435,8 +442,8 @@ class Client:
     @async_to_sync
     async def get_chat(
         self,
-        chat_id
-    ) -> props:
+        chat_id: str
+    ):
         """getting messages chat / گرفتن پیام های چت"""
         opening = await self.open_chat(chat_id)
         type_chat = await self.get_type_chat_id(chat_id)
@@ -445,8 +452,7 @@ class Client:
         peer_avatar = None
         peer_verified = False
         if not opening:
-            return props(
-                {
+            return {
                     "messages":[],
                     "chat":{
                         "name": peer_name,
@@ -456,7 +462,6 @@ class Client:
                         "type": type_chat
                     }
                 }
-            )
         try:
             header_el = WebDriverWait(self.driver, 5).until(
                 lambda d: d.find_element(By.CSS_SELECTOR, ".ChatInfo")
@@ -634,8 +639,7 @@ class Client:
                 if mid:
                     seen_ids.add(mid)
         collected.reverse()
-        return props(
-            {
+        return {
                 "messages":collected,
                 "chat":{
                     "name": peer_name,
@@ -645,20 +649,530 @@ class Client:
                     "type": type_chat
                 }
             }
-        )
+
+    @async_to_sync
+    async def get_chat_id_by_username(self, username: str) -> Optional[str]:
+        """get chat id by username / گرفتن چت آیدی با نام کاربری"""
+        try:
+            if username.startswith('@'):
+                username = username[1:]
+            print(f"🔍 جستجوی چت آیدی برای: {username}")
+            current_url = await self.get_url_opened()
+            if not current_url == self.splus_url + "/":
+                self.driver.get(self.splus_url)
+                time.sleep(3)
+            try:
+                script = f"""
+                try {{
+                    // تلاش برای تغییر مسیر به چت با نام کاربری
+                    window.location.hash = 'im?p=@{username}';
+                    return true;
+                }} catch(e) {{
+                    return false;
+                }}
+                """
+                result = self.driver.execute_script(script)
+                time.sleep(5)
+                current_url = self.driver.current_url
+                print(f"📎 URL پس از جاوااسکریپت: {current_url}")
+                import re
+                match = re.search(r'#(\d+)', current_url)
+                if match:
+                    chat_id = match.group(1)
+                    if chat_id and chat_id != "777000":
+                        print(f"✅ چت آیدی پیدا شد: {chat_id}")
+                        return chat_id
+            except Exception as e:
+                print(f"⚠️ خطا در جاوااسکریپت: {e}")
+            try:
+                search_button = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, 
+                        ".icon-search, " +
+                        "[aria-label*='جستجو'], " +
+                        "button[title*='جستجو']"
+                    ))
+                )
+                search_button.click()
+                time.sleep(2)
+                search_input = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR,
+                        "input[placeholder*='جستجو'], " +
+                        "input[type='search']"
+                    ))
+                )
+                search_input.clear()
+                search_input.send_keys(f"@{username}")
+                time.sleep(3)
+                time.sleep(3)
+                try:
+                    user_result = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH,
+                            f"//div[contains(@class, 'ListItem') and contains(., '@{username}')] | " +
+                            f"//div[contains(@class, 'Chat') and contains(., '@{username}')]"
+                        ))
+                    )
+                    user_result.click()
+                    time.sleep(5)
+                    current_url = self.driver.current_url
+                    import re
+                    match = re.search(r'#(\d+)', current_url)
+                    if match:
+                        chat_id = match.group(1)
+                        if chat_id and chat_id != "777000":
+                            print(f"✅ چت آیدی (از جستجو) پیدا شد: {chat_id}")
+                            return chat_id
+                except Exception as e:
+                    print(f"⚠️ خطا در کلیک روی نتیجه جستجو: {e}")
+            except Exception as e:
+                print(f"⚠️ خطا در جستجو: {e}")
+            try:
+                url = f"{self.splus_url}/#im?p=@{username}"
+                self.driver.get(url)
+                WebDriverWait(self.driver, 10).until(
+                    lambda d: d.current_url != self.splus_url + "/"
+                )
+                time.sleep(5)
+                try:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, "[data-peer-id]")
+                    for element in elements:
+                        peer_id = element.get_attribute("data-peer-id")
+                        if peer_id and peer_id != "777000" and len(peer_id) >= 6:
+                            print(f"✅ چت آیدی از data-peer-id: {peer_id}")
+                            return peer_id
+                except:
+                    pass
+            except Exception as e:
+                print(f"⚠️ خطا در روش URL مستقیم: {e}")
+            print("❌ چت آیدی پیدا نشد")
+            return None
+        except Exception as e:
+            print(f"❌ خطا در get_chat_id_by_username: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    @async_to_sync
+    async def get_me(self) -> dict:
+        """دریافت اطلاعات حساب کاربر / Get my account info"""
+        try:
+            current_url = await self.get_url_opened()
+            if not current_url == self.splus_url + "/":
+                self.driver.get(self.splus_url)
+                time.sleep(3)
+            try:
+                account_tab = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'tab') and contains(., 'حساب من')]"))
+                )
+                account_tab.click()
+                time.sleep(2)
+                print("✅ 'حساب من' کلیک شد")
+            except Exception as e:
+                print(f"⚠️ خطا در کلیک روی 'حساب من': {e}")
+                return {"error": "نمیتوان به حساب کاربری دسترسی پیدا کرد"}
+            try:
+                settings_xpath = "//div[contains(@class, 'ListItem-button') and .//i[contains(@class, 'icon-settings')] and contains(., 'تنظیمات')]"
+                settings_option = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, settings_xpath))
+                )
+                settings_option.click()
+                time.sleep(3)
+                print("✅ 'تنظیمات' کلیک شد")
+            except Exception as e:
+                print(f"⚠️ خطا در کلیک روی 'تنظیمات': {e}")
+                return {"error": "نمیتوان به تنظیمات دسترسی پیدا کرد"}
+            result = {
+                "phone_number": None,
+                "username": None,
+                "bio": None,
+                "user_id": None,
+                "full_name": None
+            }
+            try:
+                name_elements = WebDriverWait(self.driver, 5).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "h3.fullName, .fullName, .title, h1.title"))
+                )
+                for element in name_elements:
+                    text = element.text.strip()
+                    if text and len(text) > 0 and not text.startswith("+"):
+                        result["full_name"] = text
+                        print(f"✅ نام کامل: {text}")
+                        break
+            except Exception as e:
+                print(f"⚠️ خطا در گرفتن نام: {e}")
+            page_html = self.driver.page_source
+            soup = BeautifulSoup(page_html, "html.parser")
+            try:
+                phone_spans = soup.find_all("span", class_="subtitle", string=lambda t: t and "شماره تلفن" in str(t))
+                for span in phone_spans:
+                    title_span = span.find_previous_sibling("span", class_="title")
+                    if title_span:
+                        phone_text = title_span.get_text(strip=True)
+                        import re
+                        phone_digits = re.sub(r'\D', '', phone_text)
+                        if phone_digits.startswith('98'):
+                            phone_digits = '0' + phone_digits[2:]
+                        result["phone_number"] = phone_digits
+                        print(f"✅ شماره تلفن: {result['phone_number']}")
+                        break
+            except Exception as e:
+                print(f"⚠️ خطا در گرفتن شماره تلفن: {e}")
+            try:
+                username_spans = soup.find_all("span", class_="subtitle", string=lambda t: t and "نام کاربری" in str(t))
+                for span in username_spans:
+                    title_span = span.find_previous_sibling("span", class_="title")
+                    if title_span:
+                        username = title_span.get_text(strip=True)
+                        if username and not username.startswith("+"):
+                            result["username"] = username
+                            print(f"✅ نام کاربری: {result['username']}")
+                            break
+            except Exception as e:
+                print(f"⚠️ خطا در گرفتن نام کاربری: {e}")
+            try:
+                bio_spans = soup.find_all("span", class_="subtitle", string=lambda t: t and "بیوگرافی" in str(t))
+                for span in bio_spans:
+                    title_span = span.find_previous_sibling("span", class_="title")
+                    if title_span:
+                        result["bio"] = title_span.get_text(strip=True)
+                        print(f"✅ بیوگرافی: {result['bio'][:50]}..." if result['bio'] and len(result['bio']) > 50 else f"✅ بیوگرافی: {result['bio']}")
+                        break
+            except Exception as e:
+                print(f"⚠️ خطا در گرفتن بیوگرافی: {e}")
+            print("🔍 گرفتن user_id از طریق پیام‌های ذخیره شده...")
+            self.driver.get(self.splus_url)
+            time.sleep(3)
+            try:
+                account_tab = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'tab') and contains(., 'حساب من')]"))
+                )
+                account_tab.click()
+                time.sleep(2)
+            except Exception as e:
+                print(f"⚠️ خطا در کلیک روی 'حساب من': {e}")
+            try:
+                saved_messages = WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, 
+                        "//div[contains(@class, 'ListItem-button') and contains(., 'پیام‌های ذخیره شده')]"
+                    ))
+                )
+                saved_messages.click()
+                time.sleep(5)
+                current_url = self.driver.current_url
+                import re
+                match = re.search(r'#(\d+)', current_url)
+                if match:
+                    chat_id = match.group(1)
+                    if chat_id and chat_id != "777000":  # حذف چت سیستمی
+                        result["user_id"] = chat_id
+                        print(f"✅ چت آیدی (از پیام ذخیره شده): {result['user_id']}")
+                    else:
+                        print("⚠️ چت آیدی سیستمی است، نادیده گرفته می‌شود")
+                else:
+                    print("❌ چت آیدی در URL پیدا نشد")
+            except Exception as e:
+                print(f"⚠️ خطا در کلیک روی پیام‌های ذخیره شده: {e}")
+            self.driver.get(self.splus_url)
+            time.sleep(2)
+            print("✅ اطلاعات حساب کاربر با موفقیت دریافت شد")
+            self.me = result
+            return result
+        except Exception as e:
+            print(f"❌ خطا در get_me: {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                self.driver.get(self.splus_url)
+            except:
+                pass
+            return {
+                "phone_number": None,
+                "username": None,
+                "bio": None,
+                "user_id": None,
+                "full_name": None,
+                "error": str(e)
+            }
+
+    @async_to_sync
+    async def validate_invite_link(self, link: str) -> dict:
+        """بررسی اعتبار لینک دعوت"""
+        result = {
+            "valid": False,
+            "type": None,
+            "title": None,
+            "members_count": None
+        }
+        try:
+            import re
+            if "splus.ir" not in link:
+                return result
+            original_window = self.driver.current_window_handle
+            self.driver.execute_script(f"window.open('{link}', '_blank');")
+            time.sleep(3)
+            windows = self.driver.window_handles
+            if len(windows) > 1:
+                self.driver.switch_to.window(windows[-1])
+                time.sleep(5)
+                page_html = self.driver.page_source
+                if "گروه" in page_html or "group" in page_html.lower():
+                    result["type"] = "group"
+                elif "کانال" in page_html or "channel" in page_html.lower():
+                    result["type"] = "channel"
+                try:
+                    title_elements = self.driver.find_elements(By.CSS_SELECTOR, 
+                        "h1, h2, h3, .title, .dialog-title, .group-title, .channel-title"
+                    )
+                    for element in title_elements:
+                        text = element.text.strip()
+                        if text and len(text) > 0:
+                            result["title"] = text
+                            break
+                except:
+                    pass
+                try:
+                    members_texts = self.driver.find_elements(By.XPATH,
+                        "//*[contains(text(), 'عض') or contains(text(), 'member') or contains(text(), 'subscriber')]"
+                    )
+                    for element in members_texts:
+                        text = element.text.strip()
+                        numbers = re.findall(r'\d+', text)
+                        if numbers:
+                            result["members_count"] = int(''.join(numbers))
+                            break
+                except:
+                    pass
+                result["valid"] = True
+                self.driver.close()
+                self.driver.switch_to.window(original_window)
+            return result
+        except Exception as e:
+            print(f"⚠️ خطا در بررسی لینک: {e}")
+            try:
+                windows = self.driver.window_handles
+                if len(windows) > 1:
+                    self.driver.close()
+                    self.driver.switch_to.window(original_window)
+            except:
+                pass
+            return result
+
+    @async_to_sync
+    async def join(self, link: str) -> bool:
+        """join to group/channel from link / پیوستن به گروه/کانال از طریق لینک دعوت"""
+        try:
+            if not self.me:
+                print("📋 اطلاعات کاربر موجود نیست، در حال دریافت...")
+                await self.get_me()
+            if not self.me or not self.me.get("user_id"):
+                print("❌ اطلاعات کاربر دریافت نشد")
+                return False
+            user_id = self.me["user_id"]
+            print("📤 ارسال لینک به پیام‌های ذخیره شده...")
+            success = await self.send_text(user_id, link)
+            if not success:
+                print("❌ ارسال لینک ناموفق بود")
+                return False
+            time.sleep(3)
+            print("💬 باز کردن پیام‌های ذخیره شده...")
+            await self.open_chat(user_id)
+            time.sleep(3)
+            print("🔍 پیدا کردن لینک در پیام‌ها...")
+            chat_data = await self.get_chat(user_id)
+            if not chat_data or not chat_data.get("messages"):
+                print("❌ پیامی پیدا نشد")
+                return False
+            link_message_id = None
+            for message in chat_data["messages"]:
+                if link in message.get("text", ""):
+                    link_message_id = message.get("message_id")
+                    print(f"✅ پیام حاوی لینک پیدا شد: {link_message_id}")
+                    break
+            if not link_message_id:
+                print("❌ پیام حاوی لینک پیدا نشد")
+                return False
+            print("🖱️ کلیک روی لینک...")
+            try:
+                message_selector = f"#message{link_message_id}"
+                self.driver.execute_script(f"""
+                    var msg = document.querySelector('{message_selector}');
+                    if (msg) {{
+                        msg.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+                    }}
+                """)
+                time.sleep(2)
+                try:
+                    link_in_message = WebDriverWait(self.driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, 
+                            f"//div[@id='message{link_message_id}']//a[contains(@href, 'http')]"
+                        ))
+                    )
+                    link_in_message.click()
+                    time.sleep(5)
+                except:
+                    message_element = self.driver.find_element(By.ID, f"message{link_message_id}")
+                    message_element.click()
+                    time.sleep(3)
+                    self.driver.execute_script(f"""
+                        var msg = document.querySelector('#message{link_message_id}');
+                        if (msg) {{
+                            var link = msg.querySelector('a');
+                            if (link) {{
+                                window.open(link.href, '_blank');
+                            }}
+                        }}
+                    """)
+                    time.sleep(5)
+                print("✅ لینک باز شد")
+            except Exception as e:
+                print(f"⚠️ خطا در کلیک روی لینک: {e}")
+                try:
+                    message_element = self.driver.find_element(By.ID, f"message{link_message_id}")
+                    message_element.click()
+                    time.sleep(1)
+                    actions = ActionChains(self.driver)
+                    actions.send_keys(Keys.ENTER).perform()
+                    time.sleep(5)
+                except:
+                    pass
+            print("🔍 در جستجوی دکمه پیوستن...")
+            original_window = self.driver.current_window_handle
+            windows = self.driver.window_handles
+            if len(windows) > 1:
+                for window in windows:
+                    if window != original_window:
+                        self.driver.switch_to.window(window)
+                        break
+                time.sleep(3)
+            join_found = False
+            join_button_selectors = [
+                # برای گروه
+                "button:contains('پیوستن به گروه')",
+                "button:contains('Join Group')",
+                "button:contains('عضویت در گروه')",
+                "button:contains('پیوستن')",
+                "button:contains('Join')",
+                "button.Button--primary",
+                "button.btn-primary",
+                
+                # برای کانال
+                "button:contains('پیوستن به کانال')",
+                "button:contains('Join Channel')",
+                "button:contains('عضویت در کانال')",
+                
+                # انتخاب‌های عمومی
+                "button[type='submit']",
+                ".join-button",
+                ".JoinButton",
+            ]
+            
+            for selector in join_button_selectors:
+                try:
+                    if ":contains" in selector:
+                        text = selector.split("'")[1]
+                        join_buttons = self.driver.find_elements(By.XPATH, 
+                            f"//button[contains(text(), '{text}')] | " +
+                            f"//div[contains(text(), '{text}') and @role='button']"
+                        )
+                    else:
+                        join_buttons = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    for button in join_buttons:
+                        try:
+                            if button.is_displayed() and button.is_enabled():
+                                print(f"✅ دکمه پیدا شد: {selector}")
+                                self.driver.execute_script("arguments[0].scrollIntoView(true);", button)
+                                time.sleep(1)
+                                try:
+                                    button.click()
+                                except:
+                                    self.driver.execute_script("arguments[0].click();", button)
+                                print("✅ روی دکمه پیوستن کلیک شد")
+                                time.sleep(3)
+                                join_found = True
+                                break
+                        except:
+                            continue
+                            
+                    if join_found:
+                        break
+                except Exception as e:
+                    continue
+            if not join_found:
+                print("⚠️ دکمه پیوستن پیدا نشد، بررسی مجدد...")
+                join_texts = [
+                    "پیوستن به گروه",
+                    "پیوستن به کانال", 
+                    "عضویت در گروه",
+                    "عضویت در کانال",
+                    "Join Group",
+                    "Join Channel",
+                    "Join",
+                    "پیوستن",
+                    "عضویت",
+                    "ورود به گروه",
+                    "ورود به کانال"
+                ]
+                
+                for text in join_texts:
+                    try:
+                        elements = self.driver.find_elements(By.XPATH,
+                            f"//*[contains(text(), '{text}') and " +
+                            "(self::button or self::div or self::a or @role='button')]"
+                        )
+                        for element in elements:
+                            if element.is_displayed():
+                                print(f"✅ دکمه با متن '{text}' پیدا شد")
+                                element.click()
+                                time.sleep(3)
+                                join_found = True
+                                break
+                        if join_found:
+                            break
+                    except:
+                        continue
+            if len(windows) > 1:
+                self.driver.close()
+                self.driver.switch_to.window(original_window)
+            self.driver.get(self.splus_url)
+            time.sleep(3)
+            if join_found:
+                print("✅ با موفقیت به گروه/کانال پیوستید!")
+                return True
+            else:
+                print("⚠️ پیوستن انجام نشد (ممکن است قبلاً عضو باشید یا لینک معتبر نباشد)")
+                return False
+        except Exception as e:
+            print(f"❌ خطا در متد join: {e}")
+            import traceback
+            traceback.print_exc()
+            try:
+                self.driver.get(self.splus_url)
+            except:
+                pass
+            return False
 
     def _dispatch_js_contextmenu(self, el):
         js = """
         var el = arguments[0];
-        var ev = document.createEvent('MouseEvent');
-        ev.initMouseEvent('contextmenu', true, true, window, 1, 0,0,0,0, false, false, false, false, 2, null);
-        el.dispatchEvent(ev);
-        return true;
+        try {
+            var ev = document.createEvent('MouseEvent');
+            ev.initMouseEvent('contextmenu', true, true, window, 1, 0,0,0,0, false, false, false, false, 2, null);
+            el.dispatchEvent(ev);
+            return true;
+        } catch(e) {
+            try {
+                var ev2 = new MouseEvent('contextmenu', {bubbles:true, cancelable:true, view:window});
+                el.dispatchEvent(ev2);
+                return true;
+            } catch(e2) {
+                return false;
+            }
+        }
         """
         try:
             return self.driver.execute_script(js, el)
         except Exception:
             return False
+
 
     @async_to_sync
     async def context_click_message(
@@ -668,28 +1182,105 @@ class Client:
         menu_text: Optional[str] = None,
         timeout: int = 8
     ) -> bool:
+        """
+        Context-click on message, then click a menu item.
+        Improved: wait for menu container, search inside it, click via JS.
+        """
+        import time
         try:
             mid = str(message_id)
             if not mid.startswith("message"):
                 mid = "message" + mid
-            msg_el = WebDriverWait(self.driver, 5).until(
-                lambda d: d.find_element(By.ID, mid)
-            )
+            msg_el = WebDriverWait(self.driver, 5).until(lambda d: d.find_element(By.ID, mid))
             try:
                 self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", msg_el)
             except Exception:
                 pass
-            time.sleep(0.12)
+            time.sleep(0.08)
+            opened = False
             try:
                 ac = ActionChains(self.driver)
                 ac.move_to_element(msg_el).context_click(msg_el).perform()
+                opened = True
             except Exception:
-                self._dispatch_js_contextmenu(msg_el)
-            wait = WebDriverWait(self.driver, timeout)
-            if menu_selector:
-                item = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, menu_selector)))
-                item.click()
-                return True
+                opened = bool(self._dispatch_js_contextmenu(msg_el))
+            if not menu_selector and not menu_text:
+                return opened
+            menu_containers_selectors = [
+                ".ContextMenu", ".context-menu", ".menu", ".dropdown-menu",
+                "[role='menu']", ".popup-menu", ".menu-container"
+            ]
+            end = time.time() + float(timeout)
+            menu_container = None
+            while time.time() < end:
+                for sel in menu_containers_selectors:
+                    try:
+                        els = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                        for e in els:
+                            try:
+                                if e.is_displayed():
+                                    menu_container = e
+                                    break
+                            except Exception:
+                                menu_container = e
+                                break
+                        if menu_container:
+                            break
+                    except Exception:
+                        continue
+                if menu_container:
+                    break
+                try:
+                    els = self.driver.find_elements(By.XPATH, "//*[@role='menu' or @role='listbox']")
+                    for e in els:
+                        try:
+                            if e.is_displayed():
+                                menu_container = e
+                                break
+                        except Exception:
+                            menu_container = e
+                            break
+                    if menu_container:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.12)
+            def _safe_click(el):
+                try:
+                    self.driver.execute_script("arguments[0].click();", el)
+                    return True
+                except Exception:
+                    try:
+                        el.click()
+                        return True
+                    except Exception:
+                        return False
+            if menu_container:
+                if menu_selector:
+                    try:
+                        found = menu_container.find_elements(By.CSS_SELECTOR, menu_selector)
+                        for f in found:
+                            if _safe_click(f):
+                                return True
+                    except Exception:
+                        pass
+                if menu_text:
+                    try:
+                        xpe = f".//*[normalize-space(text())={repr(menu_text)}]"
+                        found = menu_container.find_elements(By.XPATH, xpe)
+                        for f in found:
+                            if _safe_click(f):
+                                return True
+                    except Exception:
+                        pass
+                    try:
+                        found = menu_container.find_elements(By.XPATH, f".//*[contains(normalize-space(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')), {repr(menu_text.strip().lower())})]")
+                        for f in found:
+                            if _safe_click(f):
+                                return True
+                    except Exception:
+                        pass
+            xpaths = []
             if menu_text:
                 xpaths = [
                     f"//button[normalize-space()='{menu_text}']",
@@ -697,16 +1288,30 @@ class Client:
                     f"//a[normalize-space()='{menu_text}']",
                     f"//*[normalize-space()='{menu_text}']"
                 ]
-                for xp in xpaths:
-                    try:
-                        el = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
-                        el.click()
+            if menu_selector:
+                try:
+                    el = WebDriverWait(self.driver, 0.5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, menu_selector)))
+                    if _safe_click(el):
                         return True
-                    except Exception:
-                        continue
-                return False
-            return True
-        except Exception as e:
+                except Exception:
+                    pass
+            for xp in xpaths:
+                try:
+                    el = WebDriverWait(self.driver, 0.5).until(EC.element_to_be_clickable((By.XPATH, xp)))
+                    if _safe_click(el):
+                        return True
+                except Exception:
+                    continue
+            try:
+                self.driver.save_screenshot("context_click_menu_notfound.png")
+                if menu_container:
+                    html = self.driver.execute_script("return arguments[0].outerHTML;", menu_container)
+                    with open("menu_container.html", "w", encoding="utf-8") as f:
+                        f.write(html)
+            except Exception:
+                pass
+            return False
+        except Exception:
             try:
                 self.driver.save_screenshot("context_click_error.png")
             except:
@@ -721,33 +1326,107 @@ class Client:
         timeout: int = 6,
         take_screenshot_on_fail: bool = True
     ) -> bool:
+        """
+        Wait for confirmation dialog/modal then click confirm button inside it.
+        """
+        import time
         try:
-            wait = WebDriverWait(self.driver, timeout)
-            if confirm_selector:
+            end = time.time() + float(timeout)
+            modal_selectors = [
+                ".Modal", ".modal", ".Dialog", ".dialog", ".confirm-dialog",
+                ".confirmation", ".popup", "[role='dialog']", ".overlay", ".confirmModal"
+            ]
+
+            modal_el = None
+            while time.time() < end:
+                for sel in modal_selectors:
+                    try:
+                        cand = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                        for c in cand:
+                            try:
+                                if c.is_displayed():
+                                    modal_el = c
+                                    break
+                            except Exception:
+                                modal_el = c
+                                break
+                        if modal_el:
+                            break
+                    except Exception:
+                        continue
+                if modal_el:
+                    break
                 try:
-                    btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, confirm_selector)))
-                    btn.click()
+                    cands = self.driver.find_elements(By.XPATH, "//*[@role='dialog' or @role='alertdialog']")
+                    for c in cands:
+                        try:
+                            if c.is_displayed():
+                                modal_el = c
+                                break
+                        except Exception:
+                            modal_el = c
+                            break
+                    if modal_el:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.12)
+            def _safe_click(el):
+                try:
+                    self.driver.execute_script("arguments[0].click();", el)
                     return True
+                except Exception:
+                    try:
+                        el.click()
+                        return True
+                    except Exception:
+                        return False
+            if modal_el and confirm_selector:
+                try:
+                    btns = modal_el.find_elements(By.CSS_SELECTOR, confirm_selector)
+                    for b in btns:
+                        if _safe_click(b):
+                            return True
                 except Exception:
                     pass
             candidate_texts = []
             if confirm_text:
                 candidate_texts.append(confirm_text)
             candidate_texts += ["حذف", "حذف پیام", "حذف گفتگو", "بله", "تایید", "OK", "Yes", "Delete", "Confirm"]
-            xpaths = []
+            if modal_el:
+                for t in candidate_texts:
+                    try:
+                        xp = f".//*[normalize-space(text())={repr(t)}]"
+                        els = modal_el.find_elements(By.XPATH, xp)
+                        for e in els:
+                            if _safe_click(e):
+                                return True
+                    except Exception:
+                        pass
+                for t in candidate_texts:
+                    try:
+                        low = t.strip().lower()
+                        els = modal_el.find_elements(By.XPATH, ".//button|.//a|.//div|.//span")
+                        for e in els:
+                            try:
+                                txt = (e.text or "").strip().lower()
+                                if low and low in txt:
+                                    if _safe_click(e):
+                                        return True
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
             for t in candidate_texts:
-                xpaths.extend([
-                    f"//button[normalize-space()='{t}']",
-                    f"//a[normalize-space()='{t}']",
-                    f"//div[normalize-space()='{t}']",
-                    f"//span[normalize-space()='{t}']",
-                    f"//*[@role='button' and normalize-space()='{t}']"
-                ])
-            for xp in xpaths:
                 try:
-                    el = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
-                    el.click()
-                    return True
+                    xp = f"//*[normalize-space(text())={repr(t)}]"
+                    els = self.driver.find_elements(By.XPATH, xp)
+                    for e in els:
+                        try:
+                            if _safe_click(e):
+                                return True
+                        except Exception:
+                            continue
                 except Exception:
                     continue
             try:
@@ -757,19 +1436,11 @@ class Client:
                     try:
                         txt = (b.text or "").strip().lower()
                         if not txt:
-                            val = b.get_attribute("value") or ""
-                            txt = val.strip().lower()
+                            txt = (b.get_attribute("value") or "").strip().lower()
                         for cand in low_candidates:
                             if cand and cand in txt:
-                                try:
-                                    b.click()
+                                if _safe_click(b):
                                     return True
-                                except:
-                                    try:
-                                        self.driver.execute_script("arguments[0].click();", b)
-                                        return True
-                                    except:
-                                        pass
                     except Exception:
                         continue
             except Exception:
@@ -777,15 +1448,35 @@ class Client:
             if take_screenshot_on_fail:
                 try:
                     self.driver.save_screenshot("confirm_click_failed.png")
-                except:
+                    if modal_el:
+                        html = self.driver.execute_script("return arguments[0].outerHTML;", modal_el)
+                        with open("confirm_modal.html", "w", encoding="utf-8") as f:
+                            f.write(html)
+                except Exception:
                     pass
+
             return False
+
         except Exception:
             try:
-                self.driver.save_screenshot("confirm_click_error.png")
+                if take_screenshot_on_fail:
+                    self.driver.save_screenshot("confirm_click_error.png")
             except:
                 pass
             return False
+
+    def _schedule_handler(self, handler, update):
+        async def _run():
+            try:
+                await handler(update)
+            except Exception as e:
+                print(f"❌ خطا: {e}")
+        import threading
+        thread = threading.Thread(
+            target=lambda: asyncio.run(_run()),
+            daemon=True
+        )
+        thread.start()
 
     @async_to_sync
     async def delete_message(self,message_id:str,chat_id:str) -> bool:
@@ -836,4 +1527,56 @@ class Client:
                 raise ValueError("Invalid Acsses")
         raise ValueError("group and channel can pining message")
 
+    def on_message(self,chat_id:str,is_me: Literal[True,False,None] = None):
+        """برای دریافت پیام ها"""
+        self._fetch_messages = True
+        def decorator(handler: Callable[[Update], Awaitable[None]]):
+            self.messages_handlers.append({"handler":handler,"chat_id":chat_id,"is_me":is_me})
+            return handler
+        return decorator
 
+    @async_to_sync
+    async def fetch_messages_updates(self,chat_id: str,is_me: Literal[True,False,None] = False):
+        while self.running:
+            chat = await self.get_chat(chat_id)
+            messages = chat["messages"]
+            if not self.list_:
+                for msg in messages:
+                    self.list_.append(msg["message_id"])
+            for msg in messages:
+                if not msg["message_id"] in self.list_:
+                    self.list_.append(msg["message_id"])
+                    if len(self.list_) >= 200:
+                        self.list_.pop(-1)
+                    if msg["day"] == "امروز":
+                        if not is_me:
+                            if not msg["is_me"]:
+                                update_obj = Update(msg,self,chat_id)
+                                for handler in self.messages_handlers:
+                                    self._schedule_handler(handler["handler"], update_obj)
+                        else:
+                            if msg["is_me"]:
+                                update_obj = Update(msg,self,chat_id)
+                                for handler in self.messages_handlers:
+                                    self._schedule_handler(handler["handler"], update_obj)
+
+    @async_to_sync
+    async def _run_all(self):
+        tasks = []
+        if self._fetch_messages and self.messages_handlers:
+            for msg_hnd in self.messages_handlers:
+                tasks.append(self.fetch_messages_updates(msg_hnd["chat_id"],msg_hnd["is_me"]))
+        if not tasks:
+            raise ValueError("No handlers registered. Use on_message('chat id') first.")
+        await asyncio.gather(*tasks)
+
+    def run(self):
+        """اجرای اصلی بات - فقط اگر هندلرهای مربوطه ثبت شده باشند"""
+        if not (self._fetch_messages):
+            raise ValueError("No update types selected. Use on_message() first.")
+        
+        if (self._fetch_messages and not self.messages_handlers) or (self._fetch_messages and not self.messages_handlers):
+            raise ValueError("Message handlers registered but no message callbacks defined.")
+
+        self.running = True
+        asyncio.run(self._run_all())
